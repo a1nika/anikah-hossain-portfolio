@@ -55,6 +55,11 @@
  *   node scripts/edit-page.js --list                    show the queue, run nothing
  *
  * Options for a single edit:
+ *   --reference=<path>       a screenshot or mockup of the design the page should
+ *                            have (at most 2; PNG, JPEG, GIF or WebP, up to 5 MB):
+ *                            Claude replicates its layout, colours and type, and
+ *                            never puts the picture itself on the page. Any file
+ *                            inside the repo, .git included.
  *   --image=<path|url>       an image Claude should see and may place in the
  *                            page; repeat for several. A path is a file in this
  *                            repo (e.g. assets/img/uploads/team.jpg, shown on
@@ -147,6 +152,9 @@ const positional = argv.filter((a) => !a.startsWith('--'));
 const dryRun = Boolean(flag('dry-run'));
 const generateFlag = Boolean(flag('generate'));
 const imageArgs = argv.filter((a) => a.startsWith('--image=')).map((a) => a.slice('--image='.length));
+// Screenshots of a design to replicate (--reference=<file>, repeatable, at most 2): shown to Claude
+// as the look to build, never placed on the page. The Twinstack web app keeps them inside .git.
+const referenceArgs = argv.filter((a) => a.startsWith('--reference=')).map((a) => a.slice('--reference='.length));
 const proposalOut = flag('proposal-out');
 const fromHtml = flag('from-html');
 // A conversion keeps the page's own HTML and CSS unless --markdown asks for it to be rewritten in
@@ -1796,15 +1804,67 @@ function limitVision(images) {
   });
 }
 
-/** Text-only prompts stay a string; with images, each one is labelled and sent as vision input. */
+/**
+ * The --reference screenshots as vision input: inside the repo (.git included, where the web app
+ * keeps them), a PNG, JPEG, GIF or WebP by its first bytes, at most 2 of up to 5 MB each.
+ */
+function loadReferences(list) {
+  const out = [];
+  for (const entry of list.slice(0, 2)) {
+    const absolute = path.resolve(ROOT, entry);
+    if (!absolute.startsWith(ROOT + path.sep)) {
+      console.log(`  ! design reference "${entry}" — outside the site's files, skipped`);
+      continue;
+    }
+    if (!fs.existsSync(absolute)) {
+      console.log(`  ! design reference "${entry}" — file not found, skipped`);
+      continue;
+    }
+    const bytes = fs.readFileSync(absolute);
+    const type =
+      bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+        ? 'image/png'
+        : bytes[0] === 0xff && bytes[1] === 0xd8
+          ? 'image/jpeg'
+          : bytes.subarray(0, 3).toString('latin1') === 'GIF'
+            ? 'image/gif'
+            : bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP'
+              ? 'image/webp'
+              : null;
+    if (!type || bytes.length > 5 * 1024 * 1024) {
+      console.log(`  ! design reference "${entry}" — ${type ? 'over 5 MB' : "not a PNG, JPEG, GIF or WebP"}, skipped`);
+      continue;
+    }
+    out.push({ ref: entry, block: { type: 'image', source: { type: 'base64', media_type: type, data: bytes.toString('base64') } } });
+  }
+  return out;
+}
+
+const REFERENCES = loadReferences(referenceArgs);
+
+// What a design reference asks for. It overrides the site's own look and the design rules' freedom
+// to choose one; the responsive and accessibility rules still hold.
+const REFERENCE_NOTE = `
+
+DESIGN REFERENCE: the images labelled "Design reference" are screenshots of the design the owner wants for this page, and they asked for it to be followed exactly. Replicate it as closely as you can:
+- the same sections in the same order, with the same layout, proportions and alignment;
+- the same colours (sample them from the screenshot: backgrounds, text, accents, buttons, borders);
+- the closest Google Font to each typeface, with the same sizes, weights, italics and letter spacing;
+- the same buttons, cards, icons, dividers, shadows, corner radii, spacing and decorative details.
+This overrides matching the site's other pages and any choice of your own about the look. Use the page's own words and facts where the screenshot shows text that isn't the owner's; where it shows a section the page has no content for, keep the section with clearly marked [sample] content. Where it shows photos, use the images you're given, or a placeholder block of the same size and shape. Never put the screenshot itself on the page. It must still work on phones: stack the same sections in the same order.`;
+
+/** Text-only prompts stay a string; with images or a design reference, each is labelled and sent as vision input. */
 function userContent(userPrompt, images) {
   const shown = images.filter((image) => image.block);
-  if (!shown.length) return userPrompt;
+  if (!shown.length && !REFERENCES.length) return userPrompt;
   const blocks = [];
+  REFERENCES.forEach((reference, i) => {
+    blocks.push({ type: 'text', text: `Design reference ${i + 1}: a screenshot of the design to replicate. It is not an image for the page.` }, reference.block);
+  });
   images.forEach((image, i) => {
     if (image.block) blocks.push({ type: 'text', text: `Image ${i + 1}: ${image.ref}` }, image.block);
   });
-  return [...blocks, { type: 'text', text: userPrompt }];
+  return [...blocks, { type: 'text', text: REFERENCES.length ? `${userPrompt}${REFERENCE_NOTE}` : userPrompt }];
 }
 
 /**
@@ -1850,6 +1910,8 @@ const SEARCH_FIELD_LABELS = { metaTitle: 'search title', metaDescription: 'searc
  */
 function pageModel(relFile, mode, images, original) {
   if (!FAST_MODEL || FAST_MODEL === CLAUDE_MODEL) return CLAUDE_MODEL;
+  // Copying a design from a screenshot is the most demanding page work there is.
+  if (REFERENCES.length) return CLAUDE_MODEL;
   if (!relFile.startsWith('content/') || !relFile.endsWith('.md')) return CLAUDE_MODEL;
   if (images.some((image) => image.block && image.block.source.type !== 'base64')) return CLAUDE_MODEL;
   // A conversion follows the HTML page it's given: its content and structure are all there.
@@ -2389,6 +2451,7 @@ async function applyEdit(relFile, instruction, imageEntries = [], mode = 'edit',
   for (const [i, image] of images.entries()) {
     console.log(`  Image ${i + 1}: ${image.ref}${image.block ? '' : ` (reference only: ${image.why || 'not readable'})`}`);
   }
+  for (const [i, reference] of REFERENCES.entries()) console.log(`  Design reference ${i + 1}: ${reference.ref} (the design to replicate)`);
 
   const layout = generate || convert ? layoutFor(relFile, parseFrontmatter(base).data) : null;
   // A page that shows shared data (the homepage's sections) is edited together with that data.
