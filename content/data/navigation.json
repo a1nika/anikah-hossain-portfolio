@@ -31,10 +31,6 @@
         {
           "label": "Contact",
           "url": "/contact.html"
-        },
-        {
-          "label": "RSS feed",
-          "url": "/rss.xml"
         }
       ]
     }
@@ -57,13 +53,16 @@
     "header": {
       "theme": "light",
       "layout": "right",
-      "sticky": true
+      "sticky": true,
+      "style": "floating",
+      "shrink": true
     },
     "footer": {
       "theme": "dark",
       "showTagline": true,
       "showContact": true,
-      "copyright": ""
+      "copyright": "",
+      "showSocial": true
     }
   }
 }
